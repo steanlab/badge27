@@ -84,7 +84,7 @@
 
 <script>
 /* ===== constants: the only place with magic numbers ===== */
-const BUILD='6.20';                                   // page version; needs tag firmware v5.10a for the NFC map, v5.8 or newer otherwise
+const BUILD='6.21';                                   // page version; needs tag firmware v5.10a for the NFC map, v5.8 or newer otherwise
 const NUS='6e400001-b5a3-f393-e0a9-e50e24dcca9e';    // Nordic UART Service
 const RXU='6e400002-b5a3-f393-e0a9-e50e24dcca9e';    // page -> tag (write)
 const TXU='6e400003-b5a3-f393-e0a9-e50e24dcca9e';    // tag -> page (notify)
@@ -219,7 +219,13 @@ function fmtUp(sec){
   const d=Math.floor(sec/86400), h=Math.floor(sec%86400/3600), m=Math.floor(sec%3600/60);
   return (d?d+' d ':'')+(h||d?h+' h ':'')+m+' min';
 }
-async function readInfo(){
+const STAGES={0x01:'idle (nothing in progress)',0x21:'upload: begin',0x22:'upload: data',0x23:'upload: end',0x24:'show a slide',0x25:'info',
+  0x26:'delete a slide',0x27:'set auto change',0x28:'clear all slides',0x29:'finish',0x2B:'next / previous slide (page)',0x2C:'hardware report',
+  0x2D:'NFC probe',0x30:'set order',0x31:'set NFC mode',0x32:'set boot splash',0x3F:'text command',0x41:'button: next slide',
+  0x47:'button: previous slide',0x43:'automatic change',0x44:'NFC tap',0x51:'panel: loading the picture',0x53:'panel: refreshing'};
+const stageText=c=>STAGES[c]||(c?('code 0x'+c.toString(16)):'unknown');
+const restartText=r=>[(r&2)?'watchdog':'',(r&8)?'lock-up (hard fault)':''].filter(Boolean).join(' + ')||('reason '+r);
+ async function readInfo(){
   const s=await call(Uint8Array.of(5),'N',4000);
   const o=parseInfo(s);
   let text=s, res=null;
@@ -230,6 +236,10 @@ async function readInfo(){
     if(o.M!==undefined){ $('order').value=String(o.M); text+=', order '+(o.M?'random':'in order'); }
     if(o.X!==undefined){ $('nfcoff').checked=(o.X===1); text+=', NFC tap '+(o.X?'ignored':'changes the slide'); }
     if(o.P!==undefined){ $('splashOn').checked=(o.P===1); text+=', boot splash '+(o.P?'on':'off'); }
+    if(o.O!==undefined) text+=', upload window opened '+o.O+' time'+(o.O===1?'':'s');
+    if(o.Z!==undefined) text+=', inputs now: button 1 '+((o.Z&1)?'PRESSED':'released')+', button 2 '+((o.Z&2)?'PRESSED':'released')+', NFC field '+((o.Z&4)?'present':'none');
+    if(o.K) text+=', ERROR LOG: '+o.K+' caught, last id '+o.G+', address 0x'+(o.H>>>0).toString(16)+', code 0x'+(o.Y>>>0).toString(16);
+    if(o.J) text+=', LAST FORCED RESTART: '+restartText(o.J)+' while: '+stageText(o.L||0);
     if(o.B!==undefined) text+=', battery '+(o.B?(o.B/1000).toFixed(2)+' V':'unknown');
     if(o.D!==undefined) text+=', screen refreshes '+o.D;
     if(o.C!==undefined && o.C>-900) text+=', chip '+(o.C/10).toFixed(1)+' C';
