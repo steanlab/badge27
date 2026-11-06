@@ -1,0 +1,703 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#ffffff">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>E-ink badge uploader</title>
+<style>
+ body{font:16px system-ui,sans-serif;max-width:640px;margin:1em auto;padding:0 1em}
+ button,input,select{font:inherit;margin:.2em 0;padding:.5em}
+ canvas{border:1px solid #888;width:200px;height:300px;image-rendering:pixelated}
+ progress{width:100%}
+ #log{white-space:pre-wrap;font:13px ui-monospace,monospace;background:#f4f4f4;padding:.5em;min-height:8em;max-height:22em;overflow:auto}
+ #state{font-weight:600}
+ #devinfo{margin:.2em 0;color:#235}
+ .danger{background:#c33;color:#fff;border:0;border-radius:4px}
+ dialog{border:2px solid #c33;border-radius:8px;padding:1em}
+ details{margin:.5em 0}
+</style></head><body>
+<h2>E-ink badge uploader <small id="ver"></small></h2>
+<p id="err" style="color:#c00;font-weight:600"></p>
+<script>window.onerror=function(m,s,l){var e=document.getElementById('err'); if(e) e.textContent='Script error: '+m+' (line '+l+')'; };</script>
+<p id="env"></p>
+<p><button id="connect">Connect</button> <button id="disconnect">Disconnect</button> <button id="reset">Reset</button> <button id="install" style="display:none">Install app</button></p>
+<p id="state">not connected</p>
+<p id="devinfo"></p>
+<details><summary>Tag LED and buttons: what they mean</summary><p style="font-size:14px;color:#444">Tag LED: <b>green pulse</b> = Bluetooth window open, waiting for the phone &middot;
+ <b>blue steady</b> = phone connected &middot; <b>no light</b> = Bluetooth off &middot; <b>red flash</b> = button, <b>white flash</b> = NFC tap.
+ "Disconnect" leaves the window open for 30 s so you can reconnect; "Finish" switches the tag's Bluetooth off at once
+ (open it again with a long press of the second button). While a phone is connected the buttons and NFC of the tag do nothing: use the buttons below.</p></details>
+<p><button class="act" id="prevBtn">&laquo; Previous slide</button> <button class="act" id="nextBtn">Next slide &raquo;</button></p>
+<p>Upload to slot <input id="slot" type="number" value="0" min="0" max="119" style="width:5em">
+ <input id="file" type="file" accept="image/*" multiple><br>
+ Show slot <input id="showslot" type="number" value="0" min="0" max="119" style="width:5em"></p>
+<p>Gamma <input id="gamma" type="range" min="0.6" max="1.6" step="0.05" value="1.0"> <span id="gv">1.00</span><br>
+ <label><input type="checkbox" id="mirrorX"> mirror X</label>
+ <label><input type="checkbox" id="flipY" checked> flip Y</label>
+ (compensate the scan direction of the panel)</p>
+<canvas id="prev" width="200" height="300"></canvas>
+<progress id="prog" max="100" value="0"></progress>
+<p><button class="act" id="upload">Upload (one file per slot, from the slot above)</button>
+ <button id="cancelBtn">Cancel</button>
+ <button class="act" id="show">Show slot</button> <button class="act" id="info">Info</button>
+ <button class="act" id="clear">Clear all slots</button> <button class="act" id="ping">Ping x5</button></p>
+<p>Order <select id="order" class="act"><option value="0">in order</option><option value="1">random</option></select>
+ <label><input type="checkbox" id="nfcoff" class="act"> NFC tap does not change slides</label></p>
+<p>Auto change every <input id="auto" type="number" min="0" max="65535" value="0" style="width:6em"> min (0 = off)
+ <button class="act" id="setauto">Set</button> <button class="act" id="closewin">Finish (Bluetooth off)</button></p>
+<p><button class="act" id="about">Show "About" on the tag</button>
+ <span style="font-size:14px;color:#444">a text slide with the author and the tag status; it stays on the panel but is not kept in the playlist</span></p>
+<p><button class="act" id="hw">Show "Hardware" on the tag</button>
+ <span style="font-size:14px;color:#444">chip, flash, panel, inputs and the NFC chip read from the tag; needs firmware v5.10a</span></p>
+<details><summary>Tone calibration of the panel</summary>
+ <p>1. Choose a free slot above (119), press the button below, then "Show slot". 2. Photograph the panel, crop to the outer edge of the black frame,
+ run <code>python calibrate_tone.py photo.jpg</code>. 3. Load the resulting <code>tone_curve.json</code> here.</p>
+ <p><button class="act" id="cal">Upload calibration slide</button></p>
+ <p>Tone curve file <input id="toneFile" type="file" accept=".json,application/json"> <button id="toneClear">Forget</button><br>
+ <span id="toneState">no tone curve</span></p>
+</details>
+<p>Command <input id="cmd" placeholder="ping, mtu, ver, led w" style="width:12em"> <button class="act" id="send">Send</button></p>
+<p><button id="copyLog">Copy log</button> <button id="clearLog">Clear log</button> <button id="pwacheck">PWA check</button></p>
+<div id="log"></div>
+
+<dialog id="dlg">
+ <p id="dlgText"></p>
+ <p><button id="dlgYes" class="danger">Erase all</button> <button id="dlgNo">Cancel</button></p>
+</dialog>
+
+<script>
+/* ===== constants: the only place with magic numbers ===== */
+const BUILD='6.14';                                   // page version; needs tag firmware v5.10a for the NFC map, v5.8 or newer otherwise
+const NUS='6e400001-b5a3-f393-e0a9-e50e24dcca9e';    // Nordic UART Service
+const RXU='6e400002-b5a3-f393-e0a9-e50e24dcca9e';    // page -> tag (write)
+const TXU='6e400003-b5a3-f393-e0a9-e50e24dcca9e';    // tag -> page (notify)
+const W=200, H=300, ROW=25, PLANE=7500;              // panel of the 2.7" tag: 200 x 300 px, two planes of 7500 bytes
+const SETTLE_MS=1000;                                // pause after the GATT connection before the first operation
+const COOLDOWN_MS=5000;                              // pause after a disconnect before the next connection
+const T_NOTIFY=20000, T_WRITE=8000;                  // limits for the two Bluetooth operations that can hang
+const PAL=[[1,1,1],[0,0,0],[0.69,0.02,0.0]];         // white, black, red: linear brightness relative to the panel white
+const TONE_MIX=0.6;                                  // how much of the tone correction colored pixels get
+const ABOUT={                                        // text of the "About" slide: edit freely
+  slot:119,                                          // temporary slot: the slide is shown and then deleted
+  title:'BADGE27',
+  subtitle:'e-ink badge, BLE uploader',
+  author:'Siarhei Besarab',
+  url:['github.com/steanlab/','nRF52811-BLE-badge']
+};
+
+const $=id=>document.getElementById(id);
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const enc=s=>new TextEncoder().encode(s);
+let device=null, rx=null, tx=null, busy=false, cancel=false, chunk=200, fwver='?', TONE=null, lastDisc=0;
+const inbox=[];
+const T0=Date.now();
+
+function log(s){ const l=$('log'); l.textContent+=((Date.now()-T0)/1000).toFixed(1).padStart(7)+'  '+s+'\n'; l.scrollTop=l.scrollHeight; }
+
+/* ===== limits and state ===== */
+function withTimeout(p,ms,name){
+  let t;
+  return Promise.race([p,new Promise((_,rej)=>{t=setTimeout(()=>rej(new Error('timeout: '+name+' ('+ms+' ms)')),ms);})]).finally(()=>clearTimeout(t));
+}
+async function step(name,p,ms){
+  const t0=Date.now(); log(name+' ...');
+  try{ const r=await withTimeout(p,ms,name); log('   ok ('+(Date.now()-t0)+' ms)'); return r; }
+  catch(e){ log('   FAILED: '+e.message); throw e; }
+}
+function setUi(){
+  const connected=!!rx;
+  $('connect').disabled=busy;
+  document.querySelectorAll('.act').forEach(b=>b.disabled=busy||!connected);
+  $('state').textContent=connected?('connected: '+(device?device.name:'')):'not connected';
+  if(!connected) $('devinfo').textContent='';
+}
+function onDisc(){ rx=null; tx=null; lastDisc=Date.now(); log('disconnected'); setUi(); }
+function fault(why){                                  // Chrome never releases a hung operation: close the link and start over
+  log('FAULT: '+why+'. The connection is closed; press Connect to start again.');
+  try{ if(device&&device.gatt.connected) device.gatt.disconnect(); }catch(e){}
+  rx=null; tx=null; setUi();
+}
+async function run(fn){                               // one operation at a time
+  if(busy){ log('(busy: wait for the previous operation)'); return; }
+  busy=true; cancel=false; setUi();
+  try{ await fn(); }catch(e){ log('ERROR: '+e.message); }
+  finally{ busy=false; $('prog').value=0; setUi(); }
+}
+function askConfirm(text){
+  return new Promise(res=>{
+    const d=$('dlg'); $('dlgText').textContent=text;
+    $('dlgYes').onclick=()=>{ d.close(); res(true); };
+    $('dlgNo').onclick=()=>{ d.close(); res(false); };
+    d.oncancel=()=>res(false);
+    d.showModal();
+  });
+}
+
+/* ===== link layer: write, wait for a reply ===== */
+function onNotify(e){
+  const s=new TextDecoder().decode(e.target.value).replace(/[\r\n]+$/,'');
+  inbox.push(s);
+  if(!s.startsWith('A ')) log('< '+s);
+}
+async function send(u8){
+  if(!rx) throw new Error('not connected');
+  try{ await withTimeout(rx.writeValue(u8),T_WRITE,'write'); }          // writeValue: your tested choice
+  catch(e){ if(/^timeout/.test(e.message)) fault('a write was not confirmed'); throw e; }
+}
+async function expect(prefix,timeout){
+  const t0=Date.now();
+  for(;;){
+    while(inbox.length){
+      const s=inbox.shift();
+      if(s.startsWith(prefix)) return s;
+      if(s.startsWith('E')||s.includes('ERR')) throw new Error(s);
+    }
+    if(!rx) throw new Error('disconnected');
+    if(cancel) throw new Error('cancelled');
+    if(Date.now()-t0>timeout) throw new Error('timeout waiting for "'+prefix+'"');
+    await sleep(10);
+  }
+}
+async function call(bytes,prefix,timeout){ inbox.length=0; await send(bytes); return expect(prefix,timeout); }
+
+/* ===== protocol ===== */
+function crc16(d){let c=0xFFFF;for(let i=0;i<d.length;i++){c^=d[i]<<8;for(let k=0;k<8;k++)c=(c&0x8000)?(((c<<1)^0x1021)&0xFFFF):((c<<1)&0xFFFF);}return c;}
+
+/* RLE: control byte c < 0x80: c+1 literal bytes follow; c >= 0x80: the next byte repeats (c & 0x7F) + 3 times */
+function rleEncode(src){
+  const out=[]; let i=0;
+  while(i<src.length){
+    let run=1; while(i+run<src.length && src[i+run]===src[i] && run<130) run++;
+    if(run>=3){ out.push(0x80|(run-3), src[i]); i+=run; continue; }
+    const start=i; let n=0;
+    while(i<src.length && n<128){
+      let r=1; while(i+r<src.length && src[i+r]===src[i] && r<3) r++;
+      if(r>=3) break;
+      i++; n++;
+    }
+    out.push(n-1);
+    for(let k=start;k<start+n;k++) out.push(src[k]);
+  }
+  return Uint8Array.from(out);
+}
+/* planes: 7500 bytes black/white, then 7500 bytes red. Each plane is stored raw or RLE, whichever is shorter;
+   an all-zero red plane is not sent at all. fmt: bit0 plane 0 RLE, bit1 plane 1 RLE, bit2 no plane 1 */
+function buildStored(planes){
+  const p0=planes.subarray(0,PLANE), p1=planes.subarray(PLANE);
+  let fmt=0, s0=p0, s1=p1;
+  const r0=rleEncode(p0); if(r0.length<p0.length){ s0=r0; fmt|=1; }
+  if(p1.every(v=>v===0)){ fmt|=4; s1=new Uint8Array(0); }
+  else{ const r1=rleEncode(p1); if(r1.length<p1.length){ s1=r1; fmt|=2; } }
+  const stored=new Uint8Array(s0.length+s1.length);
+  stored.set(s0,0); stored.set(s1,s0.length);
+  return {stored,fmt,len0:s0.length,len1:s1.length};
+}
+
+function parseInfo(s){                                // "N5 U17 T126 ..." -> {N:5,U:17,T:126,...}
+  const o={};
+  for(const t of s.split(' ')){ const m=/^([A-Z])(-?\d+)$/.exec(t); if(m) o[m[1]]=+m[2]; }
+  return o;
+}
+function fmtUp(sec){
+  const d=Math.floor(sec/86400), h=Math.floor(sec%86400/3600), m=Math.floor(sec%3600/60);
+  return (d?d+' d ':'')+(h||d?h+' h ':'')+m+' min';
+}
+async function readInfo(){
+  const s=await call(Uint8Array.of(5),'N',4000);
+  const o=parseInfo(s);
+  let text=s, res=null;
+  if(o.N!==undefined && o.U!==undefined && o.T!==undefined){
+    text=o.N+' slides, space used '+(o.U*4)+' of '+(o.T*4)+' KB ('+((o.T-o.U)*4)+' KB free)';
+    if(o.F!==undefined) text+=', flash '+o.F+' KB';
+    if(o.A!==undefined){ text+=', auto change '+(o.A?('every '+o.A+' min'):'off'); $('auto').value=o.A; }
+    if(o.M!==undefined){ $('order').value=String(o.M); text+=', order '+(o.M?'random':'in order'); }
+    if(o.X!==undefined){ $('nfcoff').checked=(o.X===1); text+=', NFC tap '+(o.X?'ignored':'changes the slide'); }
+    if(o.B!==undefined) text+=', battery '+(o.B?(o.B/1000).toFixed(2)+' V':'unknown');
+    if(o.D!==undefined) text+=', screen refreshes '+o.D;
+    if(o.C!==undefined && o.C>-900) text+=', chip '+(o.C/10).toFixed(1)+' C';
+    if(o.S!==undefined) text+=', uptime '+fmtUp(o.S);
+    if(o.W) text+=', watchdog restarts '+o.W;
+    res={count:o.N,usedSec:o.U,totalSec:o.T,o};
+  }
+  $('devinfo').textContent=(device?device.name:'')+' | firmware '+fwver+' | '+text;
+  log(text);
+  return res;
+}
+async function handshake(){
+  fwver='unknown (no answer to "ver")';
+  try{ fwver=await call(enc('ver'),'v',3000); }catch(e){ log('no answer to "ver": '+e.message); }
+  const vm=/^v(\d+)\.(\d+)/.exec(fwver);
+  if(!vm || +vm[1]<5 || (+vm[1]===5 && +vm[2]<8)) log('WARNING: this page needs tag firmware v5.8 or newer; some functions will not work with '+fwver);
+  chunk=200;
+  try{
+    const s=await call(enc('mtu'),'len',3000);
+    const n=parseInt(s.slice(4),10);
+    if(n>=20) chunk=Math.min(200,n-3);                // 3 bytes of frame header; the device tells us the real limit
+    log('payload per write: '+chunk+' bytes (the tag reports '+n+')');
+  }catch(e){ log('no answer to "mtu": using '+chunk+' bytes per write'); }
+  await readInfo();
+}
+async function uploadSlide(slot,planes){
+  const st=buildStored(planes), n=st.stored.length, crc=crc16(st.stored);
+  log('stored '+n+' bytes: black/white '+((st.fmt&1)?'RLE ':'raw ')+st.len0+', red '+((st.fmt&4)?'none':(((st.fmt&2)?'RLE ':'raw ')+st.len1)));
+  await call(Uint8Array.of(1,slot,st.fmt,st.len0&255,st.len0>>8,st.len1&255,st.len1>>8,crc&255,crc>>8),'B OK',20000);
+  for(let off=0;off<n;off+=chunk){
+    if(cancel) throw new Error('cancelled');
+    const part=st.stored.subarray(off,Math.min(n,off+chunk)), f=new Uint8Array(3+part.length);
+    f[0]=2; f[1]=off&255; f[2]=off>>8; f.set(part,3);
+    await call(f,'A ',5000);
+    $('prog').value=Math.round(100*(off+part.length)/n);
+  }
+  await call(Uint8Array.of(3),'V OK',10000);
+}
+function noteShown(reply){                            // "S OK 3": remember which slide is on the panel
+  const m=/^S OK (\d+)/.exec(reply);
+  if(m) $('showslot').value=+m[1];
+  log('shown: slide '+(m?m[1]:'?'));
+}
+
+/* ===== connection ===== */
+async function connect(){
+  if(device&&device.gatt.connected){
+    log('closing the previous connection ...');
+    try{ device.gatt.disconnect(); }catch(e){}
+    await sleep(1500);
+  }
+  device=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'Badge'}],optionalServices:[NUS]});
+  device.removeEventListener('gattserverdisconnected',onDisc);
+  device.addEventListener('gattserverdisconnected',onDisc);
+  log('selected: '+device.name);
+  const wait=COOLDOWN_MS-(Date.now()-lastDisc);         // the previous link may still be closing in the phone's stack
+  if(wait>0){ log('waiting '+Math.ceil(wait/1000)+' s after the last disconnect'); await sleep(wait); }
+  try{
+    const srv=await step('GATT connect',device.gatt.connect(),20000);
+    await sleep(SETTLE_MS);                            // lets Android finish its own procedures before the first operation
+    const svc=await step('find service',srv.getPrimaryService(NUS),15000);
+    const r=await step('find RX',svc.getCharacteristic(RXU),10000);
+    const t=await step('find TX',svc.getCharacteristic(TXU),10000);
+    t.addEventListener('characteristicvaluechanged',onNotify);
+    await step('enable notifications',t.startNotifications(),T_NOTIFY);
+    rx=r; tx=t;
+    log('connected: '+device.name);
+    await handshake();
+  }catch(e){
+    try{ device.gatt.disconnect(); }catch(_){}
+    rx=null; tx=null;
+    throw e;
+  }
+}
+
+/* ===== tone curve: white fraction g -> measured brightness m ===== */
+function setTone(t){
+  if(!t||!Array.isArray(t.g)||!Array.isArray(t.m)||t.g.length!==t.m.length||t.g.length<2) throw new Error('bad tone curve file');
+  const m=t.m.slice(); for(let i=1;i<m.length;i++) m[i]=Math.max(m[i],m[i-1]);
+  TONE={g:t.g.slice(),m};
+  $('toneState').textContent='tone curve loaded ('+m.length+' points)';
+  try{ localStorage.setItem('toneCurve',JSON.stringify(t)); }catch(e){}
+}
+function covFor(L){                                    // linear brightness -> white pixel fraction that really gives it
+  if(!TONE) return L;
+  const g=TONE.g, m=TONE.m;
+  if(L<=m[0]) return g[0];
+  for(let i=1;i<m.length;i++){
+    if(L<=m[i]){ const span=m[i]-m[i-1], t=span<1e-9?0:(L-m[i-1])/span; return g[i-1]+t*(g[i]-g[i-1]); }
+  }
+  return g[g.length-1];
+}
+try{ const s=localStorage.getItem('toneCurve'); if(s) setTone(JSON.parse(s)); }catch(e){}
+
+/* ===== image conversion: 3 inks, serpentine Floyd-Steinberg ===== */
+function lin(v){v/=255;return v<=0.04045?v/12.92:Math.pow((v+0.055)/1.055,2.4);}
+function smooth(a,b,x){if(x<=a)return 0;if(x>=b)return 1;const t=(x-a)/(b-a);return t*t*(3-2*t);}
+function convert(bmp,gamma){
+  const c=document.createElement('canvas');c.width=W;c.height=H;const g=c.getContext('2d');
+  const sc=Math.max(W/bmp.width,H/bmp.height),w=bmp.width*sc,h=bmp.height*sc;
+  g.fillStyle='#fff';g.fillRect(0,0,W,H);g.drawImage(bmp,(W-w)/2,(H-h)/2,w,h);
+  const px=g.getImageData(0,0,W,H).data, S=W+2;
+  const ch=[new Float32Array(S*(H+1)),new Float32Array(S*(H+1)),new Float32Array(S*(H+1))];
+  const col=new Uint8Array(W*H);
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+    const i=(y*W+x)*4, r=Math.pow(lin(px[i]),gamma), gg=Math.pow(lin(px[i+1]),gamma), b=Math.pow(lin(px[i+2]),gamma);
+    const wc=smooth(0.06,0.25,Math.max(r,gg,b)-Math.min(r,gg,b)), t=1-wc*(1-TONE_MIX);
+    ch[0][y*S+x]=t*covFor(r)+(1-t)*r;
+    ch[1][y*S+x]=t*covFor(gg)+(1-t)*gg;
+    ch[2][y*S+x]=t*covFor(b)+(1-t)*b;
+    col[y*W+x]=wc>=0.35?1:0;
+  }
+  const codes=new Uint8Array(W*H);                      // 0 white, 1 black, 2 red
+  for(let y=0;y<H;y++){
+    const rev=y&1, dir=rev?-1:1;
+    for(let k=0;k<W;k++){
+      const x=rev?W-1-k:k, j=y*S+x;
+      const v=[0,1,2].map(q=>Math.min(1,Math.max(0,ch[q][j])));
+      const cand=col[y*W+x]?[0,1,2]:[0,1];
+      let best=cand[0], bd=1e9;
+      for(const q of cand){const d=(v[0]-PAL[q][0])**2+(v[1]-PAL[q][1])**2+(v[2]-PAL[q][2])**2; if(d<bd){bd=d;best=q;}}
+      codes[y*W+x]=best;
+      const e=[v[0]-PAL[best][0],v[1]-PAL[best][1],v[2]-PAL[best][2]];
+      for(const [dx,dy,wt] of [[dir,0,7/16],[-dir,1,3/16],[0,1,5/16],[dir,1,1/16]]){
+        const xx=x+dx; if(xx>=0&&xx<W) for(let q=0;q<3;q++) ch[q][(y+dy)*S+xx]+=e[q]*wt;
+      }
+    }
+  }
+  return codes;
+}
+/* calibration slide: 5 x 4 cells of 40 x 50 px. Cells 0..16: white fraction k/16, cell 17 white, 18 black, 19 white */
+function calCodes(){
+  const codes=new Uint8Array(W*H);
+  const cw=40, chh=50, levels=[];
+  for(let i=0;i<=16;i++) levels.push(i/16);
+  levels.push(1,0,1);
+  levels.forEach((gv,idx)=>{
+    const cx=(idx%5)*cw, cy=Math.floor(idx/5)*chh, S=cw+2, a=new Float32Array(S*(chh+1));
+    for(let y=0;y<chh;y++)for(let x=0;x<cw;x++) a[y*S+x]=gv;
+    for(let y=0;y<chh;y++){
+      const rev=y&1, dir=rev?-1:1;
+      for(let k=0;k<cw;k++){
+        const x=rev?cw-1-k:k, v=a[y*S+x], n=v>=0.5?1:0, e=v-n;
+        codes[(cy+y)*W+cx+x]=n?0:1;
+        for(const [dx,dy,wt] of [[dir,0,7/16],[-dir,1,3/16],[0,1,5/16],[dir,1,1/16]]){
+          const xx=x+dx; if(xx>=0&&xx<cw) a[(y+dy)*S+xx]+=e*wt;
+        }
+      }
+    }
+  });
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++) if(x<3||x>=W-3||y<3||y>=H-3) codes[y*W+x]=1;   // black frame
+  return codes;
+}
+/* text slides: a canvas with text, converted to black / red / white */
+function textCodes(draw){
+  const c=document.createElement('canvas'); c.width=W; c.height=H;
+  const g=c.getContext('2d');
+  g.fillStyle='#fff'; g.fillRect(0,0,W,H);
+  g.textBaseline='top';
+  draw(g);
+  const d=g.getImageData(0,0,W,H).data, codes=new Uint8Array(W*H);
+  for(let i=0;i<W*H;i++){
+    const r=d[i*4], gg=d[i*4+1], b=d[i*4+2];
+    if(r-(gg+b)/2>60) codes[i]=2;                      // red text
+    else if((r+gg+b)/3<150) codes[i]=1;                // black text
+  }
+  return codes;
+}
+function aboutCodes(o,fw){
+  return textCodes(g=>{
+    let y=8;
+    const put=(txt,size,color,bold)=>{
+      g.font=(bold?'bold ':'')+size+'px Arial, Helvetica, sans-serif';
+      g.fillStyle=color; g.fillText(txt,8,y); y+=Math.round(size*1.3);
+    };
+    put(ABOUT.title,28,'#d00000',true);
+    put(ABOUT.subtitle,12,'#000000');
+    y+=6;
+    put('Author',11,'#000000');
+    put(ABOUT.author,16,'#000000',true);
+    for(const u of ABOUT.url) put(u,12,'#000000');
+    y+=10;
+    g.fillStyle='#000000'; g.fillRect(8,y,W-16,2); y+=8;
+    put('Firmware '+fw,11,'#000000');
+    put('Page v'+BUILD,11,'#000000');
+    put('Slides '+o.N+', '+(o.U*4)+' of '+(o.T*4)+' KB',11,'#000000');
+    if(o.B) put('Battery '+(o.B/1000).toFixed(2)+' V',11,'#000000');
+    if(o.D!==undefined) put('Refreshes '+o.D,11,'#000000');
+    if(o.C!==undefined && o.C>-900) put('Chip '+(o.C/10).toFixed(1)+' C',11,'#000000');
+    if(o.S!==undefined) put('Uptime '+fmtUp(o.S),11,'#000000');
+    put('Auto change '+(o.A?('every '+o.A+' min'):'off'),11,'#000000');
+    put('Order '+(o.M?'random':'in order'),11,'#000000');
+    put(new Date().toISOString().slice(0,10),11,'#000000');
+  });
+}
+function toPlanes(codes){
+  const mx=$('mirrorX').checked, fy=$('flipY').checked;
+  const planes=new Uint8Array(2*PLANE);
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+    const c2=codes[y*W+x], fx=mx?W-1-x:x, fyy=fy?H-1-y:y;
+    const o=fyy*ROW+(fx>>3), m=0x80>>(fx&7);
+    if(c2!==1) planes[o]|=m;                            // black/white plane: 1 = not black
+    if(c2===2) planes[PLANE+o]|=m;                      // red plane: 1 = red
+  }
+  return planes;
+}
+function drawPreview(codes){
+  const g=$('prev').getContext('2d'), im=g.createImageData(W,H), C=[[255,255,255],[0,0,0],[204,0,0]];
+  for(let i=0;i<W*H;i++){const c=C[codes[i]]; im.data[i*4]=c[0]; im.data[i*4+1]=c[1]; im.data[i*4+2]=c[2]; im.data[i*4+3]=255;}
+  g.putImageData(im,0,0);
+}
+async function previewFirst(){
+  const f=$('file').files[0]; if(!f) return;
+  const bmp=await createImageBitmap(f); drawPreview(convert(bmp,parseFloat($('gamma').value))); bmp.close();
+}
+
+/* ===== hardware slide: chip, flash, factory data (UICR) and the NFC chip of the tag ===== */
+const FLASH_VENDOR={0xA1:'Fudan',0xEF:'Winbond',0xC2:'Macronix',0xC8:'GigaDevice',0x20:'XMC/Micron',0x1F:'Adesto',0x85:'Puya',0x0B:'XTX'};
+const SOLUM_TYPE={0x22:'2.9" freezer',0x24:'5.85" BW',0x40:'1.6"',0x41:'2.2"',0x42:'2.9"',0x43:'2.6"',0x44:'2.7"',0x46:'4.2"',0x47:'4.3"',
+  0x48:'6.0"',0x4A:'11.6"',0x4C:'7.4"',0x4D:'1.3"',0x4E:'2.9" BW',0x51:'2.2" lite',0x63:'5.85"',0x64:'9.7"',
+  0x66:'1.6" BWRY',0x67:'2.4" BWRY',0x68:'3.0" BWRY'};                 // from the table in OEPL tagtype_db.cpp
+function parseHw(s){                                  // "H P00052811 V41414230 R24 F192 J00A12813 U<64 hex>"
+  const o={};
+  for(const t of s.split(' ')){
+    const k=t[0], v=t.slice(1);
+    if(k==='P') o.part=parseInt(v,16);
+    else if(k==='V') o.variant=(v.match(/../g)||[]).map(h=>String.fromCharCode(parseInt(h,16))).join('');
+    else if(k==='R') o.ram=+v;
+    else if(k==='F') o.flash=+v;
+    else if(k==='J') o.jedec=parseInt(v,16);
+    else if(k==='U') o.uicr=(v.match(/../g)||[]).map(h=>parseInt(h,16));
+  }
+  return o;
+}
+function hwLines(h){
+  const L=[];
+  const chip=(h.part===0x52811)?'nRF52811':('nRF'+(h.part||0).toString(16));
+  L.push('Chip '+chip+(/^[ -~]{4}$/.test(h.variant||'')?(' ('+h.variant+')'):''));
+  L.push((h.flash||'?')+' KB flash, '+(h.ram||'?')+' KB RAM');
+  const j=h.jedec||0, man=(j>>16)&255, typ=(j>>8)&255, cap=j&255;
+  if(j===0||j===0xFFFFFF){ L.push('External flash: none'); }
+  else{
+    L.push('Ext. flash '+[man,typ,cap].map(b=>b.toString(16).toUpperCase().padStart(2,'0')).join(' '));
+    const kb=(cap>=0x10&&cap<=0x18)?((1<<cap)/1024):0;
+    L.push((FLASH_VENDOR[man]||'unknown vendor')+(kb?(', '+kb+' KB'):''));
+  }
+  const u=h.uicr||[];
+  if(u.length<32||u.every(b=>b===0xFF)){ L.push('UICR: empty'); return L; }
+  const xr=u[0x0B]|(u[0x0C]<<8), yr=u[0x0D]|(u[0x0E]<<8), type=u[0x16], col=u[0x0A], c0=u[0x12], c1=u[0x13];
+  L.push('Panel '+xr+' x '+yr+' px (UICR)');
+  L.push('Shown as '+W+' x '+H+' px');
+  L.push('Type 0x'+type.toString(16).toUpperCase()+(SOLUM_TYPE[type]?(' = '+SOLUM_TYPE[type]):''));
+  L.push('Colors '+(col===1?'black/white/red':col===2?'black/white/yellow':col===0?'black/white':'0x'+col.toString(16)));
+  L.push('Controller 0x'+u[0x09].toString(16).toUpperCase().padStart(2,'0'));
+  const btn=((c0&0x80)?1:0)+((c1&0x01)?1:0);
+  L.push(btn+' button'+(btn===1?'':'s')+((c0&0x01)?', NFC':'')+((c1&0x10)?', LED':''));
+  return L;
+}
+const hx=v=>v.toString(16).toUpperCase().padStart(2,'0');
+function rangesText(a){                                // [48,49,50,64] -> "30-32 40"
+  const out=[]; let i=0;
+  while(i<a.length){
+    let j=i; while(j+1<a.length && a[j+1]===a[j]+1) j++;
+    out.push(a[i]===a[j]?hx(a[i]):hx(a[i])+'-'+hx(a[j]));
+    i=j+1;
+  }
+  return out.join(' ');
+}
+function parseNfc(s){                                  // "I B<28 hex: bit map of the answering addresses 08..77> P12 Q<32 hex> R<32 hex>"
+  const o={addrs:[]};
+  for(const t of s.split(' ')){
+    const k=t[0], v=t.slice(1);
+    const bytes=()=>(v==='?')?null:(v.match(/../g)||[]).map(x=>parseInt(x,16));
+    if(k==='B'){
+      const b=bytes()||[];
+      for(let i=0;i<b.length*8;i++){ if((b[i>>3]>>(i&7))&1) o.addrs.push(0x08+i); }
+    }
+    else if(k==='P') o.p=(v==='?')?null:parseInt(v,16);
+    else if(k==='Q') o.q=bytes();
+    else if(k==='R') o.r=bytes();
+  }
+  return o;
+}
+function nfcLines(n){
+  const L=[];
+  if(!n.addrs.length){ L.push('NFC: no I2C answer'); return L; }
+  const like=[0x30,0x40,0x43,0x48].every(a=>n.addrs.includes(a));
+  L.push('NFC I2C: '+rangesText(n.addrs));
+  if(like) L.push('like the OEPL TNB132M');
+  if(n.r && n.r[0]===0x10){
+    const blocks=(n.r[3]<<8)|n.r[4], ln=(n.r[11]<<16)|(n.r[12]<<8)|n.r[13];
+    L.push('NFC attr: '+blocks+' blocks ('+(blocks*16)+' B)');
+    L.push('NDEF stored: '+ln+' B');
+  } else if(like){ L.push('NFC attribute block unreadable'); }
+  return L;
+}
+function hwCodes(lines,title){
+  return textCodes(g=>{
+    let y=8;
+    const put=(txt,size,color,bold)=>{
+      g.font=(bold?'bold ':'')+size+'px Arial, Helvetica, sans-serif';
+      g.fillStyle=color; g.fillText(txt,8,y); y+=Math.round(size*1.4);
+    };
+    put(title,24,'#d00000',true);
+    y+=4; g.fillStyle='#000000'; g.fillRect(8,y,W-16,2); y+=8;
+    for(const t of lines) put(t,11,'#000000');
+  });
+}
+
+/* ===== buttons ===== */
+$('connect').onclick=()=>run(connect);
+$('disconnect').onclick=()=>{ try{ if(device&&device.gatt.connected) device.gatt.disconnect(); }catch(e){} };
+$('reset').onclick=()=>{                                // works even when everything is stuck
+  cancel=true;
+  try{ if(device&&device.gatt.connected) device.gatt.disconnect(); }catch(e){}
+  rx=null; tx=null; busy=false; inbox.length=0; $('prog').value=0;
+  log('reset'); setUi();
+};
+$('cancelBtn').onclick=()=>{ cancel=true; log('cancel requested'); };
+$('file').onchange=previewFirst;
+$('gamma').oninput=()=>{ $('gv').textContent=parseFloat($('gamma').value).toFixed(2); previewFirst(); };
+$('toneFile').onchange=async()=>{
+  const f=$('toneFile').files[0]; if(!f) return;
+  try{ setTone(JSON.parse(await f.text())); log('tone curve loaded'); previewFirst(); }catch(e){ log('tone file error: '+e.message); }
+};
+$('toneClear').onclick=()=>{ TONE=null; try{ localStorage.removeItem('toneCurve'); }catch(e){} $('toneState').textContent='no tone curve'; previewFirst(); };
+
+$('upload').onclick=()=>run(async()=>{
+  let slot=parseInt($('slot').value,10);
+  for(const f of [...$('file').files]){
+    const bmp=await createImageBitmap(f), codes=convert(bmp,parseFloat($('gamma').value));
+    bmp.close();
+    drawPreview(codes);
+    log('uploading '+f.name+' to slot '+slot+' ...');
+    const t0=Date.now(); await uploadSlide(slot,toPlanes(codes));
+    log('   done in '+((Date.now()-t0)/1000).toFixed(1)+' s'); slot++;
+    $('slot').value=slot;
+    $('showslot').value=slot-1;                          // "Show slot" points at what was just uploaded
+  }
+  await readInfo();
+});
+$('cal').onclick=()=>run(async()=>{
+  const slot=parseInt($('slot').value,10), codes=calCodes();
+  drawPreview(codes);
+  log('uploading the calibration slide to slot '+slot+' ...');
+  await uploadSlide(slot,toPlanes(codes));
+  $('showslot').value=slot;
+  log('done. Press "Show slot" to draw it.');
+  await readInfo();
+});
+async function showTemporary(codes,what){               // upload to the temporary slot, draw, delete: the picture stays on the panel
+  drawPreview(codes);
+  log('uploading the '+what+' slide to the temporary slot '+ABOUT.slot+' ...');
+  try{ await uploadSlide(ABOUT.slot,toPlanes(codes)); }
+  catch(e){ if(/space/.test(e.message)) log('Not enough free space on the tag: delete a slide first.'); throw e; }
+  log('drawing, please wait ...');
+  await call(Uint8Array.of(4,ABOUT.slot),'S OK',90000);
+  await call(Uint8Array.of(6,ABOUT.slot),'D OK',5000);
+  log('the '+what+' slide is on the tag');
+  await readInfo();
+}
+$('about').onclick=()=>run(async()=>{
+  const inf=await readInfo();                           // the numbers on the slide are taken from the tag right now
+  if(!inf) throw new Error('the tag did not give its status (firmware too old?)');
+  await showTemporary(aboutCodes(inf.o,fwver),'About');
+});
+$('hw').onclick=()=>run(async()=>{
+  let s;
+  try{ s=await call(Uint8Array.of(0x0C),'H ',4000); }
+  catch(e){ throw new Error('no hardware report: this needs tag firmware v5.9 or newer ('+e.message+')'); }
+  const lines=hwLines(parseHw(s));
+  try{
+    const ns=await call(Uint8Array.of(0x0D),'I ',6000);
+    log('nfc: '+ns);
+    for(const l of nfcLines(parseNfc(ns))) lines.push(l);
+  }catch(e){ lines.push('NFC: not probed'); log('nfc probe: '+e.message+' (needs firmware v5.10a)'); }
+  lines.push('Firmware '+fwver);
+  log('hardware: '+lines.join(' | '));
+  await showTemporary(hwCodes(lines,'HARDWARE'),'Hardware');
+});
+$('show').onclick=()=>run(async()=>{
+  log('drawing, please wait ...');
+  noteShown(await call(Uint8Array.of(4,parseInt($('showslot').value,10)),'S OK',90000));
+});
+async function stepSlide(dir){
+  log('changing the slide, please wait ...');
+  noteShown(await call(Uint8Array.of(0x0B,dir<0?0xFF:1),'S OK',90000));
+}
+$('prevBtn').onclick=()=>run(()=>stepSlide(-1));
+$('nextBtn').onclick=()=>run(()=>stepSlide(1));
+$('info').onclick=()=>run(readInfo);
+$('clear').onclick=()=>run(async()=>{
+  if(!(await askConfirm('Erase ALL slides? This cannot be undone.'))) return;
+  log('clearing ...');
+  await call(Uint8Array.of(8),'Cleared',60000);
+  await readInfo();
+});
+$('order').onchange=()=>run(async()=>{
+  await call(Uint8Array.of(0x10,$('order').value==='1'?1:0),'C OK',8000);
+  await readInfo();
+});
+$('nfcoff').onchange=()=>run(async()=>{
+  await call(Uint8Array.of(0x11,$('nfcoff').checked?1:0),'C OK',8000);
+  await readInfo();
+});
+$('ping').onclick=()=>run(async()=>{
+  const ts=[];
+  for(let i=0;i<5;i++){ const t0=performance.now(); await call(enc('ping'),'pong',3000); ts.push(Math.round(performance.now()-t0)); }
+  log('ping round trip, ms: '+ts.join(', '));
+});
+$('setauto').onclick=()=>run(async()=>{
+  const m=Math.max(0,Math.min(65535,parseInt($('auto').value,10)||0));
+  await call(Uint8Array.of(7,m&255,m>>8),'C OK',8000);
+  log('auto change: '+(m?('every '+m+' min'):'off'));
+  await readInfo();
+});
+$('closewin').onclick=()=>run(async()=>{
+  inbox.length=0;
+  await send(Uint8Array.of(9));
+  log('finished: Bluetooth on the tag is switched off');
+  await sleep(300);
+  try{ if(device&&device.gatt.connected) device.gatt.disconnect(); }catch(e){}
+});
+$('send').onclick=()=>run(async()=>{
+  const t=$('cmd').value; if(!t) return;
+  log('> '+t);
+  await call(enc(t),'',4000);
+});
+$('copyLog').onclick=async()=>{ try{ await navigator.clipboard.writeText($('log').textContent); log('log copied'); }catch(e){ log('copy failed: '+e.message); } };
+$('clearLog').onclick=()=>{ $('log').textContent=''; };
+/* ===== PWA: installable, opens offline after the first visit ===== */
+let installEvt=null;
+window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); installEvt=e; $('install').style.display=''; });
+$('install').onclick=async()=>{ if(!installEvt) return; installEvt.prompt(); try{ await installEvt.userChoice; }catch(e){} installEvt=null; $('install').style.display='none'; };
+window.addEventListener('appinstalled',()=>{ $('install').style.display='none'; log('app installed'); });
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('sw.js').catch(e=>log('service worker not registered: '+e.message));
+  navigator.serviceWorker.ready.then(()=>log('offline mode: ready (the page is saved in the phone)'));
+  setTimeout(()=>{ if(!navigator.serviceWorker.controller) log('offline mode: not active yet (open the page once more; press "PWA check" if it stays so)'); },8000);
+}
+/* ===== PWA self-check ===== */
+async function pwaCheck(){
+  log('--- PWA check ---');
+  log('secure context: '+window.isSecureContext+', standalone window: '+matchMedia('(display-mode: standalone)').matches);
+  const link=document.querySelector('link[rel=manifest]');
+  log('manifest link: '+(link?link.href:'MISSING in the page'));
+    for(const f of ['sw.js','manifest.json','icon-192.png','icon-512.png']){
+    try{ const r=await fetch(f,{cache:'no-store'}); log('file '+f+': HTTP '+r.status); }catch(e){ log('file '+f+': FAILED '+e.message); }
+  }
+  let man=null;
+  try{
+    const r=await fetch('manifest.json',{cache:'no-store'});
+    log('manifest.json: HTTP '+r.status+', type '+r.headers.get('content-type'));
+    man=await r.json();
+    log('  name="'+man.name+'" start_url="'+man.start_url+'" display="'+man.display+'" icons='+(man.icons?man.icons.length:0));
+  }catch(e){ log('manifest.json FAILED: '+e.message); }
+  if(man&&man.icons){
+    for(const ic of man.icons){
+      try{
+        const r=await fetch(ic.src,{cache:'no-store'});
+        if(!r.ok){ log('  icon '+ic.src+': HTTP '+r.status+' (the file is missing)'); continue; }
+        const b=await createImageBitmap(await r.blob());
+        log('  icon '+ic.src+': HTTP 200, '+b.width+'x'+b.height+' (declared '+ic.sizes+')');
+        b.close();
+      }catch(e){ log('  icon '+ic.src+' FAILED: '+e.message); }
+    }
+  }
+  if('serviceWorker' in navigator){
+    try{
+      const reg=await navigator.serviceWorker.getRegistration();
+      log('service worker: '+(reg?('registered, scope '+reg.scope+', active='+!!reg.active+', waiting='+!!reg.waiting+', installing='+!!reg.installing):'NOT registered'));
+      log('this page is controlled by the worker: '+!!navigator.serviceWorker.controller);
+      const keys=await caches.keys();
+      log('caches: '+(keys.join(', ')||'none'));
+      if(keys.length){ const c=await caches.open(keys[0]); const ks=await c.keys(); log('  saved files: '+ks.map(k=>k.url.split('/').pop()||'(page)').join(', ')); }
+    }catch(e){ log('service worker check FAILED: '+e.message); }
+  }else{ log('this browser has no service worker support'); }
+  log('install offer from Chrome seen: '+(installEvt?'yes':'no'));
+  log('--- end of check ---');
+}
+$('pwacheck').onclick=()=>pwaCheck();
+/* ===== start ===== */
+$('ver').textContent='v'+BUILD;
+if(!navigator.bluetooth) $('env').textContent='This browser has no Web Bluetooth. Use Chrome on Android or a desktop computer.';
+else if(!window.isSecureContext) $('env').textContent='Open this page over https.';
+setUi();
+</script></body></html>
