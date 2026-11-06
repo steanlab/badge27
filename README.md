@@ -1,6 +1,6 @@
-# badge27
+# nRF52811-BLE-badge
 
-An e-ink name badge that you change from your phone. A Bluetooth control page and firmware files for the
+badge27 is e-ink name badge that you change from your phone. A Bluetooth control page and firmware files for the
 Solum Newton M3 2.7" electronic shelf label (nRF52811, black / white / red).
 
 **Control page:** https://steanlab.github.io/badge27/  (Chrome on Android or a computer; installable as an app, works offline after the first visit)
