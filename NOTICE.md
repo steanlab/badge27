@@ -29,9 +29,8 @@ The firmware file contains the unmodified SoftDevice S112 binary and code built 
 5-clause Nordic license: the software must only be used with a Nordic Semiconductor ASA integrated circuit;
 binaries must not be reverse engineered, decompiled, modified or disassembled; the name of Nordic may not be
 used to endorse products derived from it. The SDK and the SoftDevice are not part of this repository.
-Parts of the SDK come under their own licenses (for example ARM CMSIS: BSD 3-clause), see
-documentation/licenses.txt in the nRF5 SDK.
-
-## Source code
-
-The firmware source code is not published.
+The nRF5 SDK files come under several licenses; each file states its own at the top (see documentation/licenses.txt
+in the SDK): the nRF5 SDK license (the 5-clause license above, for most files), the SoftDevice license, the ARM
+BSD 3-clause license (CMSIS and system files), and the licenses of third-party code in the SDK folder "external".
+The firmware is also linked with newlib-nano (C library) and libgcc (GCC runtime library, under the GCC Runtime
+Library Exception). A complete list of the components that are part of a release will be added to this file.
