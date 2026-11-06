@@ -60,14 +60,18 @@
  <span style="font-size:14px;color:#444">a text slide with the author and the tag status; it stays on the panel but is not kept in the playlist</span></p>
 <p><button class="act" id="hw">Show "Hardware" on the tag</button>
  <span style="font-size:14px;color:#444">chip, flash, panel, inputs and the NFC chip read from the tag; needs firmware v5.10a</span></p>
-<details><summary>Tone calibration of the panel</summary>
+<p><label><input type="checkbox" id="splashOn" class="act"> show the boot splash at power-up</label>
+ <select id="splashColor"><option value="red">red text</option><option value="white">white text</option></select>
+ <button class="act" id="splashBtn">Install boot splash</button>
+ <button class="act" id="reboot">Reboot tag</button></p>
+ <details><summary>Tone calibration of the panel</summary>
  <p>1. Choose a free slot above (119), press the button below, then "Show slot". 2. Photograph the panel, crop to the outer edge of the black frame,
  run <code>python calibrate_tone.py photo.jpg</code>. 3. Load the resulting <code>tone_curve.json</code> here.</p>
  <p><button class="act" id="cal">Upload calibration slide</button> <button class="act" id="grad">Gradient test</button></p>
  <p>Tone curve file <input id="toneFile" type="file" accept=".json,application/json"> <button id="toneClear">Forget</button><br>
  <span id="toneState">no tone curve</span></p>
 </details>
-<p>Command <input id="cmd" placeholder="ping, mtu, ver, led w" style="width:12em"> <button class="act" id="send">Send</button></p>
+<p>Command <input id="cmd" placeholder="ping, mtu, ver, led w, reboot" style="width:12em"> <button class="act" id="send">Send</button></p>
 <p><button id="copyLog">Copy log</button> <button id="clearLog">Clear log</button> <button id="pwacheck">PWA check</button></p>
 <div id="log"></div>
 
@@ -78,7 +82,7 @@
 
 <script>
 /* ===== constants: the only place with magic numbers ===== */
-const BUILD='6.17';                                   // page version; needs tag firmware v5.10a for the NFC map, v5.8 or newer otherwise
+const BUILD='6.18';                                   // page version; needs tag firmware v5.10a for the NFC map, v5.8 or newer otherwise
 const NUS='6e400001-b5a3-f393-e0a9-e50e24dcca9e';    // Nordic UART Service
 const RXU='6e400002-b5a3-f393-e0a9-e50e24dcca9e';    // page -> tag (write)
 const TXU='6e400003-b5a3-f393-e0a9-e50e24dcca9e';    // tag -> page (notify)
@@ -223,6 +227,7 @@ async function readInfo(){
     if(o.A!==undefined){ text+=', auto change '+(o.A?('every '+o.A+' min'):'off'); $('auto').value=o.A; }
     if(o.M!==undefined){ $('order').value=String(o.M); text+=', order '+(o.M?'random':'in order'); }
     if(o.X!==undefined){ $('nfcoff').checked=(o.X===1); text+=', NFC tap '+(o.X?'ignored':'changes the slide'); }
+    if(o.P!==undefined){ $('splashOn').checked=(o.P===1); text+=', boot splash '+(o.P?'on':'off'); }
     if(o.B!==undefined) text+=', battery '+(o.B?(o.B/1000).toFixed(2)+' V':'unknown');
     if(o.D!==undefined) text+=', screen refreshes '+o.D;
     if(o.C!==undefined && o.C>-900) text+=', chip '+(o.C/10).toFixed(1)+' C';
@@ -811,6 +816,69 @@ async function pwaCheck(){
   log('--- end of check ---');
 }
 $('pwacheck').onclick=()=>pwaCheck();
+/* ===== boot splash: black background, text in red (or white); kept in the system slot 118 ===== */
+const SPLASH={
+  slot:118,
+  title:'BADGE27 PROJECT',
+  text:'Developer and author of the idea: Siarhei Besarab aka steanlab',
+  url:'github.com/steanlab/badge27'
+};
+function splashCodes(whiteText){
+  const c=document.createElement('canvas'); c.width=W; c.height=H;
+  const g=c.getContext('2d');
+  g.fillStyle='#000000'; g.fillRect(0,0,W,H);
+  g.textBaseline='top'; g.textAlign='center';
+  const ink=whiteText?'#ffffff':'#e00000';
+  const font=(s,b)=>(b?'bold ':'')+s+'px Arial, Helvetica, sans-serif';
+  const fit=(txt,max,b,maxSize)=>{ let s=maxSize; g.font=font(s,b); while(s>8 && g.measureText(txt).width>max){ s--; g.font=font(s,b); } return s; };
+  const wrap=(txt,s,b,max)=>{
+    g.font=font(s,b); const out=[]; let cur='';
+    for(const w of txt.split(' ')){ const t=cur?cur+' '+w:w; if(!cur||g.measureText(t).width<=max) cur=t; else{ out.push(cur); cur=w; } }
+    if(cur) out.push(cur);
+    return out;
+  };
+  const max=W-20;
+  const ts=fit(SPLASH.title,max,true,30);
+  const bs=13, lines=wrap(SPLASH.text,bs,false,max);
+  const us=fit(SPLASH.url,max,false,13);
+  const gap=26, lh=Math.round(bs*1.4);
+  const total=Math.round(ts*1.2)+gap+lines.length*lh+gap+Math.round(us*1.2);
+  let y=Math.max(10,Math.round((H-total)/2));
+  g.fillStyle=ink;
+  g.font=font(ts,true); g.fillText(SPLASH.title,W/2,y); y+=Math.round(ts*1.2)+gap;
+  g.font=font(bs,false); for(const l of lines){ g.fillText(l,W/2,y); y+=lh; }
+  y+=gap;
+  g.font=font(us,false); g.fillText(SPLASH.url,W/2,y);
+  const d=g.getImageData(0,0,W,H).data, codes=new Uint8Array(W*H);
+  for(let i=0;i<W*H;i++){
+    const r=d[i*4], gg=d[i*4+1], b=d[i*4+2];
+    if(whiteText) codes[i]=((r+gg+b)/3>110)?0:1;        // white letters on black
+    else codes[i]=(r-(gg+b)/2>60)?2:1;                  // red letters on black
+  }
+  return codes;
+}
+$('splashBtn').onclick=()=>run(async()=>{
+  const codes=splashCodes($('splashColor').value==='white');
+  drawPreview(codes);
+  log('uploading the boot splash to slot '+SPLASH.slot+' ...');
+  try{ await uploadSlide(SPLASH.slot,toPlanes(codes)); }
+  catch(e){ if(/space/.test(e.message)) log('Not enough free space on the tag: delete a slide first.'); throw e; }
+  log('drawing the splash, please wait ...');
+  await call(Uint8Array.of(4,SPLASH.slot),'S OK',90000);
+  log('the boot splash is installed and shown now');
+  await readInfo();
+});
+$('splashOn').onchange=()=>run(async()=>{
+  await call(Uint8Array.of(0x12,$('splashOn').checked?1:0),'C OK',8000);
+  await readInfo();
+});
+$('reboot').onclick=()=>run(async()=>{
+  log('rebooting the tag ... Bluetooth on the tag is off after the restart: hold button 2 for 1.5 s to open the window again');
+  inbox.length=0;
+  await send(enc('reboot'));
+  await sleep(500);
+  try{ if(device&&device.gatt.connected) device.gatt.disconnect(); }catch(e){}
+});
 /* ===== start ===== */
 $('ver').textContent='v'+BUILD;
 if(!navigator.bluetooth) $('env').textContent='This browser has no Web Bluetooth. Use Chrome on Android or a desktop computer.';
