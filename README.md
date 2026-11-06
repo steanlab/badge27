@@ -90,8 +90,6 @@ same license for derived work. The project builds on the work of the
 [OpenEPaperLink](https://github.com/OpenEPaperLink/OpenEPaperLink) community. The firmware file contains the Nordic
 SoftDevice under Nordic's license. Details: [NOTICE.md](NOTICE.md) and [LICENSE](LICENSE).
 
-The firmware source code is not published.
-
 ## Contact
 
 Questions and requests (including consultations): open an issue in this repository.
