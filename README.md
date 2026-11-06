@@ -37,3 +37,61 @@ No other tag is supported.
 ## Flashing
 
 1. **Back up the tag first** (flash and the factory data in the UICR; do not skip this):
+`openocd -f interface/cmsis-dap.cfg -f target/nrf52.cfg -c “adapter speed 1000” -c “init” -c “halt” -c “dump_image backup_flash.bin 0x0 0x30000” -c “dump_image backup_uicr.bin 0x10001000 0x1000” -c “shutdown”`
+2. Download the latest `.hex` file from [Releases](../../releases) and check it against `SHA256SUMS.txt`.
+3. Flash it:
+`openocd -f interface/cmsis-dap.cfg -f target/nrf52.cfg -c “adapter speed 1000” -c “init” -c “halt” -c “program badge27-firmware-vX.Y.hex verify reset” -c “shutdown”`
+Never use "mass erase": it also erases the factory data (UICR) of the tag.
+4. After the start the LED flashes blue, then green once.
+
+The original firmware is replaced. There is no over-the-air update: a new version is flashed the same way.
+
+## Using the tag
+
+| What | How |
+|---|---|
+| Next / previous slide | button 1 / button 2 (short press) |
+| Open the upload window | hold button 2 for 1.5 s (blue flash, then a green pulse every 2 s) |
+| Next slide by NFC | touch the tag with a phone (white flash); can be switched off on the page |
+| Window closes | 2 minutes after it was opened, 30 s after the phone disconnects, or at once with "Finish" |
+
+| LED | Meaning |
+|---|---|
+| green pulse | upload window open, waiting for the phone |
+| blue steady | phone connected |
+| red flash | slide changed by a button |
+| white flash | slide changed by an NFC tap |
+| 5 red flashes | battery low: the screen is not refreshed any more |
+| 3 short red flashes | there are no slides |
+
+## The control page
+
+1. Hold button 2 of the tag for 1.5 s.
+2. Open the page, press **Connect**, choose "Badge27".
+3. Choose pictures and press **Upload**. A slide takes about 3 to 9 seconds to upload; a screen refresh takes about 25 seconds.
+4. Other functions: show a slide, next / previous, order (in order or random), auto change, clear all slides,
+   text slides "About" and "Hardware" (author, battery, chip, flash, panel), a calibration slide for the tone curve.
+
+Pictures are converted in the browser (three inks, error diffusion). The slide format is compressed, so a tag with
+512 KB of flash holds roughly 35 colour photos or about 60 black-and-white pictures.
+
+## Limits
+
+- One tag model; the picture size (200 x 300 px) is fixed.
+- No over-the-air firmware update; battery life is not measured yet.
+- NFC is used only to change slides; writing content into the NFC chip is not implemented.
+- iPhone not tested.
+
+## Credits and licenses
+
+The control page, the documentation and the firmware file are shared under
+[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/): non-commercial use, credit to the authors,
+same license for derived work. The project builds on the work of the
+[OpenEPaperLink](https://github.com/OpenEPaperLink/OpenEPaperLink) community. The firmware file contains the Nordic
+SoftDevice under Nordic's license. Details: [NOTICE.md](NOTICE.md) and [LICENSE](LICENSE).
+
+The firmware source code is not published.
+
+## Contact
+
+Questions and requests (including consultations): open an issue in this repository.
